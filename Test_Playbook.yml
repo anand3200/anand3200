@@ -1,0 +1,121 @@
+- name: Setup all nodes, including nf-ems
+  hosts: all
+  pre_tasks:
+    - name: Ensure ssh host keys known on NF-EMS node, for each host, by IP and by hostname
+      #run_once: true
+      delegate_to: localhost
+      lineinfile:
+        dest: ~/.ssh/known_hosts
+        regexp: "^{{item[1]+' '+item[0]}}"
+        create: yes
+        state: present
+        line: "{{ lookup('pipe', 'ssh-keyscan -t '+item[0]+' -p 22 ' + item[1]) }}"
+      with_nested:
+        -
+          - ssh-rsa
+          - ecdsa-sha2-nistp256
+        -
+          - " {{ host_details[0].ip }}"
+          - " {{ host_details[0].hostname }}"
+
+  tasks:
+    - name: Setup timezone
+      become: yes
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Copy /etc/hosts from nfems to vnf nodes in /var/tmp/hosts
+      copy:
+        src: /etc/hosts
+        dest: /var/tmp/hosts
+      when: inventory_hostname in groups['vnfnodes']
+
+    - name: Delete line already existing  in /etc/hosts
+      lineinfile:
+        dest: /etc/hosts
+        regexp: '{{ item.ip }} {{ item.hostname }}$'
+        state: absent
+        backup: yes
+      with_items:  "{{ host_details }}"
+      when: inventory_hostname in groups['vnfnodes']
+      
+    - name: Delete ipv6 line already existing  in /etc/hosts
+      lineinfile:
+        dest: /etc/hosts
+        regexp: '{{item.ipv6}} {{ item.hostname }}$'
+        state: absent
+        backup: yes
+      with_items:  "{{ host_details }}"
+      when: 
+        - inventory_hostname in groups['vnfnodes'] 
+        - item.ipv6 is defined
+
+    - name: copy /etc/hosts entries to fact
+      command: cat /var/tmp/hosts
+      register: etc_host_entries
+      when: inventory_hostname in groups['vnfnodes']
+
+    - name: Copy /etc/hosts entries from nfems to begining of /etc/hosts in vnf nodes
+      lineinfile:
+        dest: /etc/hosts
+        insertbefore: BOF
+        line: "{{ item }}"
+      with_items: "{{ etc_host_entries.stdout_lines }}"
+      when: inventory_hostname in groups['vnfnodes']
+
+
+    - name: Delete the /var/tmp/hosts file
+      file:
+        path: /var/tmp/hosts
+        state: absent
+      when: inventory_hostname in groups['vnfnodes']
+
+    - name: Install nf-ems-boot.repo yum repository
+      become: yes
+      copy:
+        src: /etc/yum.repos.d/
+        dest: /etc/yum.repos.d/
+
+    - name: Install chrony, firewalld and python3-dnf-plugin-versionlock
+      become: yes
+      yum:
+        name:
+          - chrony
+          - firewalld
+          - python3-dnf-plugin-versionlock
+        disablerepo: '*'
+        state: present
+        enablerepo: "{{ bootstrap_enabled_repos }}"
+        disable_gpg_check: "{{ os_disable_gpg_check | default('no')}}"
+      register: result
+      retries: 5
+      delay: 20
+      until: result is not failed
+        
+
+    - name: Configure chronyd
+      become: yes
+      lineinfile:
+        path: /etc/chrony.conf
+        line: server {{ item }} iburst
+      register: chronyd_conf
+      with_items: "{{ ntp_server_name }}"
+
+    - name: Restart chronyd if needed
+      become: yes
+      systemd:
+        name: chronyd
+        state: restarted
+      when: chronyd_conf.results | selectattr('changed') | list | count > 0
+
+    - name: Install custom utilities like vim,wireshark, mlocate etc.
+      become: yes
+      yum:
+        name: ['xauth','wget','vim','mlocate','wireshark']
+        disablerepo: '*'
+        enablerepo: "{{ bootstrap_enabled_repos }}"
+        disable_gpg_check: "{{ os_disable_gpg_check | default('no')}}"
+      register: result
+      retries: 5
+      delay: 20
+      until: result is not failed 
